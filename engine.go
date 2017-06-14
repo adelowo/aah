@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"time"
 
 	"aahframework.org/ahttp.v0"
 	"aahframework.org/aruntime.v0"
@@ -50,17 +51,39 @@ type (
 	// Engine is the aah framework application server handler for request and response.
 	// Implements `http.Handler` interface.
 	engine struct {
-		isRequestIDEnabled bool
-		requestIDHeader    string
-		isGzipEnabled      bool
-		ctxPool            *pool.Pool
-		reqPool            *pool.Pool
-		replyPool          *pool.Pool
-		bufPool            *pool.Pool
+		isRequestIDEnabled        bool
+		requestIDHeader           string
+		isGzipEnabled             bool
+		ctxPool                   *pool.Pool
+		reqPool                   *pool.Pool
+		replyPool                 *pool.Pool
+		bufPool                   *pool.Pool
+		isRequestAccessLogEnabled bool
 	}
 
 	byName []os.FileInfo
+
+	//requestAccessLog contains data about the current request
+	requestAccessLog struct {
+		startTime time.Time
+		ctx       *Context
+		requestID string
+	}
 )
+
+//String implements the standard Stringer interface and allows for a fluent usage with a logger
+func (r requestAccessLog) String() string {
+
+	format := `%s | Response time : %v | %d | %s | %s | %d bytes was written | %s://%s%s %s from %s"`
+
+	return fmt.Sprintf(format, r.requestID,
+		time.Now().Sub(r.startTime),
+		r.ctx.Res.Status(), r.ctx.Req.Method,
+		r.ctx.Req.Path, r.ctx.Res.BytesWritten(),
+		r.ctx.Req.Scheme, r.ctx.Req.Host,
+		r.ctx.Req.Raw.RequestURI, r.ctx.Req.Raw.Proto,
+		r.ctx.Req.ClientIP)
+}
 
 //‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
 // Engine methods
@@ -81,7 +104,17 @@ func (e *engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 'OnRequest' server extension point
 	publishOnRequestEvent(ctx)
 
+	if e.isRequestAccessLogEnabled {
+		ral := requestAccessLog{
+			startTime: time.Now(),
+			ctx:       ctx,
+			requestID: ctx.Req.Header.Get(e.requestIDHeader),
+		}
+		defer log.Debug(ral)
+	}
+
 	// Handling route
+
 	if e.handleRoute(ctx) == flowStop {
 		return
 	}
@@ -133,9 +166,7 @@ func (e *engine) handleRecovery(ctx *Context) {
 // It won't set new request id header already present.
 func (e *engine) setRequestID(ctx *Context) {
 	if ess.IsStrEmpty(ctx.Req.Header.Get(e.requestIDHeader)) {
-		guid := ess.NewGUID()
-		log.Debugf("Request ID: %v", guid)
-		ctx.Req.Header.Set(e.requestIDHeader, guid)
+		ctx.Req.Header.Set(e.requestIDHeader, ess.NewGUID())
 	} else {
 		log.Debugf("Request already has ID: %v", ctx.Req.Header.Get(e.requestIDHeader))
 	}
@@ -422,6 +453,9 @@ func (e *engine) putBuffer(b *bytes.Buffer) {
 
 func newEngine(cfg *config.Config) *engine {
 	ahttp.GzipLevel = cfg.IntDefault("render.gzip.level", 5)
+
+	isAccessLogEnabled := cfg.BoolDefault("request.access_log.enable", false)
+
 	if !(ahttp.GzipLevel >= 1 && ahttp.GzipLevel <= 9) {
 		logAsFatal(fmt.Errorf("'render.gzip.level' is not a valid level value: %v", ahttp.GzipLevel))
 	}
@@ -454,5 +488,6 @@ func newEngine(cfg *config.Config) *engine {
 				return &bytes.Buffer{}
 			},
 		),
+		isRequestAccessLogEnabled: isAccessLogEnabled,
 	}
 }
